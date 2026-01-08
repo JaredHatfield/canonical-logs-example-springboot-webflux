@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: turboencabulator-service
+
+server:
+  port: 8080
+
+app:
+  env: prod
+  region: us-east-1
+  version: 2026.01.07.1
