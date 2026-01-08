@@ -12,13 +12,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * Tests that validate the canonical logging contract:
@@ -66,15 +67,12 @@ class CanonicalLoggingContractTest {
                 .exchange()
                 .expectStatus().isOk();
 
-        // Wait a bit for async log emission
-        Thread.sleep(100);
-
-        // Assert exactly one log entry
-        List<ILoggingEvent> logEvents = listAppender.list;
-        assertThat(logEvents).hasSize(1);
+        // Wait for async log emission using Awaitility
+        await().atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(listAppender.list).hasSize(1));
 
         // Parse the log message as JSON
-        String logMessage = logEvents.get(0).getFormattedMessage();
+        String logMessage = listAppender.list.get(0).getFormattedMessage();
         Map<String, Object> logData = objectMapper.readValue(logMessage, new TypeReference<>() {});
 
         // Assert required fields exist
@@ -111,11 +109,9 @@ class CanonicalLoggingContractTest {
                     .expectStatus().isOk();
         }
 
-        // Wait for async log emission
-        Thread.sleep(200);
-
-        // Assert exactly three log entries (one per request)
-        assertThat(listAppender.list).hasSize(3);
+        // Wait for async log emission using Awaitility
+        await().atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(listAppender.list).hasSize(3));
 
         // Each log should have unique request_id
         List<String> requestIds = listAppender.list.stream()
@@ -144,11 +140,9 @@ class CanonicalLoggingContractTest {
                 .exchange()
                 .expectStatus().isNotFound();
 
-        // Wait for async log emission
-        Thread.sleep(100);
-
-        // Assert exactly one log entry
-        assertThat(listAppender.list).hasSize(1);
+        // Wait for async log emission using Awaitility
+        await().atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(listAppender.list).hasSize(1));
 
         // Parse the log message
         String logMessage = listAppender.list.get(0).getFormattedMessage();
@@ -171,11 +165,9 @@ class CanonicalLoggingContractTest {
                 .exchange()
                 .expectStatus().isOk();
 
-        // Wait for the churn operation to complete and log to be emitted
-        Thread.sleep(1500);
-
-        // Assert exactly one log entry
-        assertThat(listAppender.list).hasSize(1);
+        // Wait for the churn operation to complete and log to be emitted using Awaitility
+        await().atMost(Duration.ofSeconds(3))
+                .untilAsserted(() -> assertThat(listAppender.list).hasSize(1));
 
         // Parse the log message
         String logMessage = listAppender.list.get(0).getFormattedMessage();
@@ -207,9 +199,9 @@ class CanonicalLoggingContractTest {
                 .exchange()
                 .expectStatus().isOk();
 
-        Thread.sleep(100);
-
-        assertThat(listAppender.list).hasSize(1);
+        // Wait for async log emission using Awaitility
+        await().atMost(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertThat(listAppender.list).hasSize(1));
 
         String logMessage = listAppender.list.get(0).getFormattedMessage();
         Map<String, Object> logData = objectMapper.readValue(logMessage, new TypeReference<>() {});

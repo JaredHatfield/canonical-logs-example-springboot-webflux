@@ -214,7 +214,7 @@ public class CanonicalWebFilter implements WebFilter, Ordered {
             }
         } else {
             // ON_COMPLETE case - successful completion
-            ctx.put("reactor.signal", signalType.name().toLowerCase());
+            ctx.put("reactor.signal", "on_complete");
             
             // For successful completion, default to 200 if no status was explicitly set.
             // This is standard WebFlux behavior - 200 is the implicit default for OK responses.
