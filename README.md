@@ -11,7 +11,7 @@ This example demonstrates a production-ready approach to structured logging wher
   - Common deployment attributes (service, env, region, version)
   - Controller-added attributes (domain identifiers from path or headers)
   - Service-added attributes (work details, timings, output summary)
-- **Thread-safe for concurrent requests** using Reactor Context instead of thread-local storage
+- **Thread-safe for concurrent requests** using request-scoped state stored in exchange, optionally accessible via Reactor Context
 
 ## Key Concept: Reactor Context vs Request-Scoped Beans
 
@@ -106,23 +106,13 @@ Key characteristics:
 - Automatic propagation through flatMap, defer, delay, etc.
 ```
 
-## Why Reactor Context Cannot Be Treated as a Mutable Accumulator
+## Understanding Reactor Context Immutability
 
-Reactor Context is **immutable** - once created, you cannot add or modify entries. This is a deliberate design choice:
+Reactor Context is **immutable** - you cannot add or modify entries in an existing Context. When you call `ctx.put()`, it returns a **new Context** with the added entry. This is by design for thread safety and functional programming principles.
 
-```java
-// This pattern DOES NOT WORK:
-return someOperation()
-    .contextWrite(ctx -> ctx.put("key1", value1))  // Creates new Context
-    .flatMap(result -> {
-        // Later in the chain
-        return anotherOperation()
-            .contextWrite(ctx -> ctx.put("key2", value2));  // Creates another new Context!
-    });
-// The two contexts are separate - key2 is NOT visible where key1 was written
-```
+**Key insight**: Context is metadata propagation, not a shared mutable map. You can add values during the chain setup, but you're always creating new Context instances, not mutating shared state.
 
-**The Solution**: Store a **mutable object reference** in the immutable Context:
+**The Solution for Canonical Logging**: Store a **mutable object reference** in the immutable Context:
 
 ```java
 // WebFilter: Create mutable holder once
@@ -171,7 +161,7 @@ public Mono<Response> run(@PathVariable String id, ServerWebExchange exchange) {
 ```java
 public Mono<Result> doWork(String id) {
     return Mono.deferContextual(contextView -> {
-        CanonicalLogContext logCtx = CanonicalLogContextHolder.get(Context.of(contextView));
+        CanonicalLogContext logCtx = CanonicalLogContextHolder.get(contextView);
         if (logCtx != null) {
             logCtx.put("work.detail", "computed");
         }
@@ -206,8 +196,8 @@ public Mono<Result> doWork(String id, CanonicalLogContext ctx) {
 ### Performance Considerations
 
 1. **Memory**: Each request allocates a `CanonicalLogContext` (~200 bytes + entries)
-2. **Synchronization**: The context uses `synchronized` blocks for thread safety
-3. **JSON Serialization**: One `ObjectMapper.writeValueAsString()` call per request
+2. **Thread Safety**: The context uses `ConcurrentHashMap` for lock-free writes under load
+3. **JSON Serialization**: One `ObjectMapper.writeValueAsString()` call per request (CPU work on completion thread)
 4. **Context Propagation**: Reactor Context lookup has minimal overhead
 
 ### When NOT to Use This Pattern

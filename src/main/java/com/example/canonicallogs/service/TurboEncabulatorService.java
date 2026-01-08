@@ -4,7 +4,6 @@ import com.example.canonicallogs.logging.CanonicalLogContext;
 import com.example.canonicallogs.logging.CanonicalLogContextHolder;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
-import reactor.util.context.Context;
 
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
@@ -18,7 +17,7 @@ import java.util.concurrent.ThreadLocalRandom;
  * 
  * <pre>{@code
  * return Mono.deferContextual(contextView -> {
- *     CanonicalLogContext ctx = CanonicalLogContextHolder.get(Context.of(contextView));
+ *     CanonicalLogContext ctx = CanonicalLogContextHolder.get(contextView);
  *     if (ctx != null) {
  *         ctx.put("service.field", value);
  *     }
@@ -68,8 +67,8 @@ public class TurboEncabulatorService {
             
             long durationMs = (System.nanoTime() - startNs) / 1_000_000;
 
-            // Access the canonical log context from Reactor Context
-            CanonicalLogContext logCtx = CanonicalLogContextHolder.get(Context.of(contextView));
+            // Access the canonical log context from Reactor Context using ContextView directly
+            CanonicalLogContext logCtx = CanonicalLogContextHolder.get(contextView);
             if (logCtx != null) {
                 logCtx.put("compute.strategy", "random");
                 logCtx.put("compute.duration_ms", durationMs);
@@ -96,7 +95,7 @@ public class TurboEncabulatorService {
 
         return Mono.deferContextual(contextView -> {
             // Access context before the delay to record intent
-            CanonicalLogContext logCtx = CanonicalLogContextHolder.get(Context.of(contextView));
+            CanonicalLogContext logCtx = CanonicalLogContextHolder.get(contextView);
             
             return Mono.delay(Duration.ofMillis(churnTimeMs))
                     .then(Mono.fromRunnable(() -> {

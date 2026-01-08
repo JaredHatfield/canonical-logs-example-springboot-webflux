@@ -1,6 +1,7 @@
 package com.example.canonicallogs.logging;
 
 import reactor.util.context.Context;
+import reactor.util.context.ContextView;
 
 /**
  * Key for storing and retrieving {@link CanonicalLogContext} in Reactor Context.
@@ -39,14 +40,6 @@ public final class CanonicalLogContextHolder {
     }
 
     /**
-     * Creates a new Reactor Context containing a fresh {@link CanonicalLogContext}.
-     * Typically called in a WebFilter at the start of request processing.
-     */
-    public static Context withNewContext(Context parent) {
-        return parent.put(KEY, new CanonicalLogContext());
-    }
-
-    /**
      * Creates a new Reactor Context containing the given {@link CanonicalLogContext}.
      * Used when the context has already been created (e.g., by a WebFilter).
      */
@@ -55,19 +48,20 @@ public final class CanonicalLogContextHolder {
     }
 
     /**
-     * Retrieves the {@link CanonicalLogContext} from Reactor Context.
+     * Retrieves the {@link CanonicalLogContext} from a Reactor ContextView.
+     * Use this in {@code Mono.deferContextual} or similar reactive operators.
      * 
-     * @param context the Reactor Context
+     * @param contextView the Reactor ContextView (read-only view of Context)
      * @return the CanonicalLogContext, or null if not present
      */
-    public static CanonicalLogContext get(Context context) {
-        return context.getOrDefault(KEY, null);
+    public static CanonicalLogContext get(ContextView contextView) {
+        return contextView.getOrDefault(KEY, null);
     }
 
     /**
      * Checks if a {@link CanonicalLogContext} is present in the Reactor Context.
      */
-    public static boolean hasContext(Context context) {
-        return context.hasKey(KEY);
+    public static boolean hasContext(ContextView contextView) {
+        return contextView.hasKey(KEY);
     }
 }

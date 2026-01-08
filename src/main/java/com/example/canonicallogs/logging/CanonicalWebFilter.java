@@ -11,11 +11,13 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * WebFlux filter that initializes canonical log context at request start
@@ -32,47 +34,31 @@ import java.util.UUID;
  * <ul>
  *   <li>Creates and initializes {@link CanonicalLogContext} at request start</li>
  *   <li>Places it in Reactor Context for downstream operators to access</li>
+ *   <li>Uses {@code doOnError} to capture errors in the reactive chain</li>
  *   <li>Uses {@code doFinally} to emit the log when the reactive chain completes</li>
  * </ul>
  * 
  * <h2>Reactor Context Propagation</h2>
  * <p>The key insight is that Reactor Context propagates "upward" from subscriber to publisher.
- * By using {@code contextWrite} at the end of the filter chain, we make the context available
+ * By using {@code contextWrite} at the start of the operator chain, we make the context available
  * to all downstream operators. The {@code doFinally} callback executes when the request
  * completes (success, error, or cancel), ensuring exactly one log record per request.
  * 
- * <h2>Why Not Use Micrometer Observation?</h2>
- * <p>Micrometer Observation is designed for metrics and tracing, not for emitting structured
- * "fat" log records. While Observation provides hooks like {@code onStart}, {@code onStop},
- * and custom key-value pairs, it's optimized for:
- * <ul>
- *   <li>Low-cardinality tags suitable for metrics</li>
- *   <li>Trace context propagation (traceId, spanId)</li>
- *   <li>Standard observability backends (Prometheus, Zipkin, etc.)</li>
- * </ul>
+ * <h2>Complementary Use with Micrometer Observation</h2>
+ * <p>Micrometer Observation is designed for metrics and tracing, while this pattern is for
+ * structured "fat" log records. You can use both: Observation for metrics/tracing and
+ * this pattern for canonical logs. Correlate them via trace/request ids if tracing is enabled.
  * 
- * <p>Our canonical log pattern requires:
- * <ul>
- *   <li>High-cardinality business attributes (user IDs, entity IDs, computed values)</li>
- *   <li>Custom JSON structure output</li>
- *   <li>Flexible attribute accumulation from controllers and services</li>
- * </ul>
- * 
- * <p>That said, you <em>can</em> combine both: use Observation for metrics/tracing and
- * this pattern for structured canonical logs. They serve complementary purposes.
+ * <h2>Performance Note</h2>
+ * <p>JSON serialization (ObjectMapper.writeValueAsString) is CPU work performed on the request
+ * completion thread. For most applications this is negligible, but for very high QPS endpoints,
+ * consider benchmarking or offloading serialization to boundedElastic scheduler if needed.
  */
 @Component
 public class CanonicalWebFilter implements WebFilter, Ordered {
 
     private static final int MAX_ERROR_MESSAGE_LENGTH = 500;
     private static final String CANONICAL_CONTEXT_ATTR = "canonical.log.context";
-    
-    /**
-     * Attribute key used by Spring Boot's error handling to store the exception.
-     * This matches the key used by DefaultErrorAttributes internally.
-     */
-    private static final String ERROR_ATTRIBUTE = 
-            "org.springframework.boot.web.reactive.error.DefaultErrorAttributes.ERROR";
 
     private final Environment env;
     private final AppRuntimeProperties runtime;
@@ -91,7 +77,7 @@ public class CanonicalWebFilter implements WebFilter, Ordered {
 
     @Override
     public int getOrder() {
-        // Run early to capture timing, but after any security filters
+        // Run early to capture timing
         return Ordered.HIGHEST_PRECEDENCE + 100;
     }
 
@@ -106,44 +92,63 @@ public class CanonicalWebFilter implements WebFilter, Ordered {
         // Initialize baseline fields
         initializeContext(ctx, exchange.getRequest());
 
-        // Decorate the response to capture status code before completion
+        // Use an AtomicReference to capture status reliably across async boundaries.
+        AtomicReference<Integer> capturedStatus = new AtomicReference<>();
+        
+        // Create a response decorator to capture status when it's set
         ServerWebExchange decoratedExchange = exchange.mutate()
-                .response(new StatusCapturingResponse(exchange.getResponse()))
+                .response(new StatusCapturingResponse(exchange.getResponse(), capturedStatus))
                 .build();
 
-        // Process the request and emit log at completion
+        // Also register beforeCommit as a fallback for status capture
+        exchange.getResponse().beforeCommit(() -> {
+            var statusCode = exchange.getResponse().getStatusCode();
+            if (statusCode != null) {
+                capturedStatus.compareAndSet(null, statusCode.value());
+            }
+            return Mono.empty();
+        });
+
+        // Process the request with proper reactive chain ordering:
+        // contextWrite first (makes context available to downstream),
+        // then doOnError (captures errors in the reactive chain),
+        // then doFinally (emits log on completion/error/cancel)
         return chain.filter(decoratedExchange)
-                .doFinally(signalType -> emitCanonicalLog(ctx, decoratedExchange))
-                .contextWrite(context -> CanonicalLogContextHolder.withContext(context, ctx));
+                .contextWrite(context -> CanonicalLogContextHolder.withContext(context, ctx))
+                .doOnError(error -> {
+                    ctx.put("outcome", "failure");
+                    ctx.put("error_type", error.getClass().getSimpleName());
+                    ctx.put("error_message", safeMessage(error.getMessage()));
+                })
+                .doFinally(signalType -> {
+                    // Final status check - try response.getStatusCode() as fallback
+                    var statusCode = exchange.getResponse().getStatusCode();
+                    if (statusCode != null) {
+                        capturedStatus.compareAndSet(null, statusCode.value());
+                    }
+                    emitCanonicalLog(ctx, exchange, capturedStatus.get(), signalType);
+                });
     }
 
     /**
-     * Response decorator that ensures status code is available for logging.
+     * Response decorator that captures the status code when it's set.
      */
     private static class StatusCapturingResponse 
             extends org.springframework.http.server.reactive.ServerHttpResponseDecorator {
         
-        private Integer capturedStatus;
+        private final AtomicReference<Integer> capturedStatus;
         
-        StatusCapturingResponse(ServerHttpResponse delegate) {
+        StatusCapturingResponse(ServerHttpResponse delegate, AtomicReference<Integer> capturedStatus) {
             super(delegate);
+            this.capturedStatus = capturedStatus;
         }
         
         @Override
         public boolean setStatusCode(org.springframework.http.HttpStatusCode status) {
             if (status != null) {
-                this.capturedStatus = status.value();
+                capturedStatus.compareAndSet(null, status.value());
             }
             return super.setStatusCode(status);
-        }
-        
-        Integer getCapturedStatus() {
-            // First try captured status, then delegate's status
-            if (capturedStatus != null) {
-                return capturedStatus;
-            }
-            org.springframework.http.HttpStatusCode status = getStatusCode();
-            return status != null ? status.value() : null;
         }
     }
 
@@ -169,29 +174,59 @@ public class CanonicalWebFilter implements WebFilter, Ordered {
         // It gets set later by the router/handler mapping.
     }
 
-    private void emitCanonicalLog(CanonicalLogContext ctx, ServerWebExchange exchange) {
+    private void emitCanonicalLog(CanonicalLogContext ctx, ServerWebExchange exchange, 
+                                   Integer capturedStatus, SignalType signalType) {
         // Ensure exactly one emission per request
         if (!ctx.markEmittedIfFirst()) {
             return;
         }
 
+        // Use monotonic nanoTime for accurate duration calculation (not affected by clock changes)
+        long durationMs = (System.nanoTime() - ctx.startNano()) / 1_000_000;
         Instant end = Instant.now();
-        long durationMs = end.toEpochMilli() - ctx.start().toEpochMilli();
 
         ServerHttpResponse response = exchange.getResponse();
-        Integer statusCode = null;
+        Integer statusCode = capturedStatus;
         
-        // Try to get status from our capturing decorator first
-        if (response instanceof StatusCapturingResponse capturingResponse) {
-            statusCode = capturingResponse.getCapturedStatus();
-        }
-        // Fall back to standard method
+        // Fall back to response.getStatusCode() if decorator didn't capture
         if (statusCode == null && response.getStatusCode() != null) {
             statusCode = response.getStatusCode().value();
         }
-        // Default to 200 for successful completions with no explicit status
-        if (statusCode == null) {
-            statusCode = 200;
+
+        // Handle different signal types appropriately
+        if (signalType == SignalType.CANCEL) {
+            // Handle cancellation explicitly - don't default to 200
+            ctx.put("outcome", "cancel");
+            ctx.put("reactor.signal", "cancel");
+            // Only set status code if we actually observed one
+            if (statusCode != null) {
+                ctx.put("http.status_code", statusCode);
+            }
+        } else if (signalType == SignalType.ON_ERROR) {
+            // Error case - outcome should already be set by doOnError
+            ctx.put("reactor.signal", "on_error");
+            if (statusCode != null) {
+                ctx.put("http.status_code", statusCode);
+            }
+            // Ensure outcome is set even if doOnError didn't run (shouldn't happen, but defensive)
+            if (ctx.snapshot().get("outcome") == null) {
+                ctx.put("outcome", "failure");
+            }
+        } else {
+            // ON_COMPLETE case - successful completion
+            ctx.put("reactor.signal", signalType.name().toLowerCase());
+            
+            // For successful completion, default to 200 if no status was explicitly set.
+            // This is standard WebFlux behavior - 200 is the implicit default for OK responses.
+            if (statusCode == null) {
+                statusCode = 200;
+            }
+            ctx.put("http.status_code", statusCode);
+            
+            // Set outcome based on status if not already set (e.g., by doOnError)
+            if (ctx.snapshot().get("outcome") == null) {
+                ctx.put("outcome", outcomeFromStatus(statusCode));
+            }
         }
 
         // Try to get the matched route pattern
@@ -204,18 +239,6 @@ public class CanonicalWebFilter implements WebFilter, Ordered {
 
         ctx.put("ts", end.toString());
         ctx.put("duration_ms", durationMs);
-        ctx.put("http.status_code", statusCode);
-        ctx.put("outcome", outcomeFromStatus(statusCode));
-
-        // Check for error in exchange - Spring Boot stores errors in a known attribute
-        // The attribute key is used internally by DefaultErrorAttributes
-        Throwable error = exchange.getAttribute(ERROR_ATTRIBUTE);
-        
-        if (error != null) {
-            ctx.put("outcome", "failure");
-            ctx.put("error_type", error.getClass().getSimpleName());
-            ctx.put("error_message", safeMessage(error.getMessage()));
-        }
 
         try {
             Map<String, Object> payload = ctx.snapshot();
