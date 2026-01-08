@@ -66,6 +66,13 @@ public class CanonicalWebFilter implements WebFilter, Ordered {
 
     private static final int MAX_ERROR_MESSAGE_LENGTH = 500;
     private static final String CANONICAL_CONTEXT_ATTR = "canonical.log.context";
+    
+    /**
+     * Attribute key used by Spring Boot's error handling to store the exception.
+     * This matches the key used by DefaultErrorAttributes internally.
+     */
+    private static final String ERROR_ATTRIBUTE = 
+            "org.springframework.boot.web.reactive.error.DefaultErrorAttributes.ERROR";
 
     private final Environment env;
     private final AppRuntimeProperties runtime;
@@ -200,13 +207,9 @@ public class CanonicalWebFilter implements WebFilter, Ordered {
         ctx.put("http.status_code", statusCode);
         ctx.put("outcome", outcomeFromStatus(statusCode));
 
-        // Check for error in exchange
-        Throwable error = exchange.getAttribute(
-                org.springframework.web.server.ServerWebExchange.LOG_ID_ATTRIBUTE + ".error"
-        );
-        if (error == null) {
-            error = exchange.getAttribute("org.springframework.boot.web.reactive.error.DefaultErrorAttributes.ERROR");
-        }
+        // Check for error in exchange - Spring Boot stores errors in a known attribute
+        // The attribute key is used internally by DefaultErrorAttributes
+        Throwable error = exchange.getAttribute(ERROR_ATTRIBUTE);
         
         if (error != null) {
             ctx.put("outcome", "failure");

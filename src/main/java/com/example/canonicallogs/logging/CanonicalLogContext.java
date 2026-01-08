@@ -28,7 +28,9 @@ public class CanonicalLogContext {
 
     private final Instant start = Instant.now();
     
-    // Synchronized to handle concurrent access from multiple reactive operators
+    // Using LinkedHashMap with manual synchronization instead of ConcurrentHashMap
+    // because we want to preserve insertion order in the final JSON output.
+    // ConcurrentHashMap doesn't guarantee iteration order.
     private final Map<String, Object> fields = new LinkedHashMap<>();
     private final Object lock = new Object();
     
