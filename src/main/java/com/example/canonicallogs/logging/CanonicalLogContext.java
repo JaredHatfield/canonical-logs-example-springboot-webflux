@@ -3,6 +3,7 @@ package com.example.canonicallogs.logging;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -21,23 +22,31 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * </ul>
  * 
  * <h2>Thread Safety</h2>
- * <p>Uses a synchronized map because multiple reactive operators may execute
- * concurrently or on different threads during a single request's lifecycle.
+ * <p>Uses {@code ConcurrentHashMap} for writes to avoid lock contention under high load.
+ * At emit time, values are copied into a {@code LinkedHashMap} to preserve insertion order
+ * in the final JSON output.
  */
 public class CanonicalLogContext {
 
     private final Instant start = Instant.now();
+    private final long startNano = System.nanoTime();
     
-    // Using LinkedHashMap with manual synchronization instead of ConcurrentHashMap
-    // because we want to preserve insertion order in the final JSON output.
-    // ConcurrentHashMap doesn't guarantee iteration order.
-    private final Map<String, Object> fields = new LinkedHashMap<>();
-    private final Object lock = new Object();
+    // Use ConcurrentHashMap for thread-safe writes without lock contention.
+    // At emit time, we copy to a LinkedHashMap for ordered JSON output.
+    private final Map<String, Object> fields = new ConcurrentHashMap<>();
     
     private final AtomicBoolean emitted = new AtomicBoolean(false);
 
     public Instant start() {
         return start;
+    }
+
+    /**
+     * Returns the monotonic start time in nanoseconds for accurate duration calculation.
+     * Unlike {@link Instant#now()}, this is not affected by system clock adjustments.
+     */
+    public long startNano() {
+        return startNano;
     }
 
     /**
@@ -49,20 +58,17 @@ public class CanonicalLogContext {
      */
     public void put(String key, Object value) {
         if (value != null) {
-            synchronized (lock) {
-                fields.put(key, value);
-            }
+            fields.put(key, value);
         }
     }
 
     /**
-     * Returns a snapshot of the current log fields.
+     * Returns a snapshot of the current log fields with stable ordering.
+     * Copies to a LinkedHashMap to preserve a consistent key order in the JSON output.
      * Safe to call while other operators are still adding fields.
      */
     public Map<String, Object> snapshot() {
-        synchronized (lock) {
-            return new LinkedHashMap<>(fields);
-        }
+        return new LinkedHashMap<>(fields);
     }
 
     /**
